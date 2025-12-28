@@ -1,0 +1,47 @@
+# 生产环境配置
+# 注意：Docker Compose v2+ 不再需要 version 字段
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: radarm-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # 数据持久化（生产环境不挂载代码，使用镜像中的代码）
+      - ./radarm_data:/app/radarm_data
+      - ./out:/app/out
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FOR_DISABLE_CONSOLE_CTRL_HANDLER=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: radarm-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    # 如果需要开发模式热重载，可以使用以下配置替代上面的 build 配置：
+    # volumes:
+    #   - ./src:/app/src
+    #   - ./public:/app/public
+    #   - ./package.json:/app/package.json
+    #   - /app/node_modules
+    # command: npm start
+
+volumes:
+  radarm_data:
+  out:
+

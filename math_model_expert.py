@@ -211,7 +211,14 @@ def run_expert_loop(user_query, data_context, api_keys, model_config, execute_ca
         code = code_match.group(1).strip() if code_match else code_res
         
         process_log.append(f"**⚙️ 系统运行代码中...**")
-        exec_text, exec_img, new_df = execute_callback(code, df)
+        # 支持新的4元组返回： (output_text, image_path, plotly_json, new_df)
+        result = execute_callback(code, df)
+        if len(result) == 4:
+            exec_text, exec_img, plotly_json, new_df = result
+        else:
+            # 向后兼容：如果是3元组，添加 None 作为 plotly_json
+            exec_text, exec_img, new_df = result
+            plotly_json = None
         
         # 错误预检
         error_flag = False

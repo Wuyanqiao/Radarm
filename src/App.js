@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, MessageSquare, Play, BarChart2, FileText, Settings, Database, X, Loader2, Terminal, Zap, Trash2, Copy, Server, Plus, Layers, PanelLeftClose, PanelLeft, Users, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Printer, FileDown, RotateCcw, RotateCw, SlidersHorizontal, AtSign, Globe, Image as ImageIcon, Eye, Command } from 'lucide-react';
+import PlotlyChart from './components/PlotlyChart';
 
 const uuid = () => Math.random().toString(36).substr(2, 9);
 const API_BASE = 'http://localhost:8000';
@@ -725,6 +726,7 @@ export default function RadarmApp() {
           tables: res.tables || [],
           images,
           image: res.image || (images.length ? images[0] : null),
+          plotly_json: res.plotly_json || null,  // 新增：Plotly 图表 JSON
           code: null,
           result: null,
           log: res.process_log || '',
@@ -835,7 +837,7 @@ export default function RadarmApp() {
         const updatedMessages = item.messages.map((m, i) => i === msgIdx ? { ...m, isApplyingActions: false, actionsApplied: true } : m);
         const appliedMsg = { role: 'ai', content: res.message || "已应用操作。", code: res.generated_code, result: null, image: null, log: '' };
         const follow = res.agent_followup;
-        const followMsg = (follow && follow.reply) ? { role: 'ai', content: follow.reply, code: follow.generated_code || null, result: follow.execution_result || null, image: follow.image || null, tables: follow.tables || [], images: follow.images || [], log: follow.process_log || '' } : null;
+        const followMsg = (follow && follow.reply) ? { role: 'ai', content: follow.reply, code: follow.generated_code || null, result: follow.execution_result || null, image: follow.image || null, tables: follow.tables || [], images: follow.images || [], plotly_json: follow.plotly_json || null, log: follow.process_log || '' } : null;
         return {
           ...item,
           messages: [...updatedMessages, appliedMsg, ...(followMsg ? [followMsg] : [])],
@@ -999,6 +1001,7 @@ export default function RadarmApp() {
         image: ob.image || (images.length ? images[0] : null),
         images,
         tables,
+        plotly_json: ob.plotly_json || null,  // 新增：Plotly 图表 JSON
         log: ob.process_log || '',
         actions: suggestedActions.length ? suggestedActions : null,
         needsConfirmation: !!ob.needs_confirmation,
@@ -1194,63 +1197,271 @@ export default function RadarmApp() {
       thinkingStartedAt: startedAt
     });
 
-    try {
+    // 检查是否启用流式响应（默认启用，可通过设置关闭）
+    const useStream = s.enableStream !== false && (runMode === 'agent_multi' || runMode === 'agent_single');
+    
+    if (useStream) {
+      // 流式响应模式
       const controller = new AbortController();
       abortRef.current[sessionId] = controller;
-      const response = await fetch(`${API_BASE}/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-      const resData = await response.json();
-      const durationMs = Date.now() - startedAt;
+      
+      // 创建初始 AI 消息（用于流式更新）
+      let streamMsgId = null;
+      let streamContent = '';
+      let streamLog = '';
+      let streamCode = '';
+      let streamResult = '';
+      let streamImage = null;
+      let streamImages = [];
+      let streamTables = [];
+      let streamPlotlyJson = null;
+      let streamActions = null;
+      let streamNeedsConfirmation = false;
+      let streamRiskNotes = [];
+      let finalData = null;
       
       setSessions(prev => prev.map(item => {
-          if (item.id !== sessionId) return item;
-          const suggestedActions = (resData.suggested_actions || []).map(a => ({ ...a, checked: true }));
-          const images = Array.isArray(resData.images) ? resData.images : ((resData.charts || []).map(c => c?.path).filter(Boolean));
-          const tables = Array.isArray(resData.tables) ? resData.tables : [];
-          const newMsg = {
-              role: 'ai',
-              content: resData.reply,
-              code: resData.generated_code,
-              result: resData.execution_result,
-              image: resData.image || (images.length ? images[0] : null),
-              images,
-              tables,
-              log: resData.process_log,
-              actions: suggestedActions.length ? suggestedActions : null,
-              needsConfirmation: !!resData.needs_confirmation,
-              riskNotes: resData.risk_notes || [],
-              actionsApplied: false,
-              isApplyingActions: false,
-              thinkMs: durationMs,
-          };
-          return {
-              ...item, messages: [...item.messages, newMsg], isAnalyzing: false, thinkingStartedAt: null, lastThinkMs: durationMs,
-              data: resData.data_changed ? resData.new_data_preview : item.data,
-              dataMeta: resData.data_changed ? { ...item.dataMeta, rows: resData.rows, cols: resData.cols } : item.dataMeta,
-              history: resData.history || item.history,
-              historyStack: resData.history_stack || item.historyStack,
-              meta: resData.meta || item.meta,
-              dataProfile: resData.profile || item.dataProfile,
-          };
+        if (item.id !== sessionId) return item;
+        const newMsg = {
+          role: 'ai',
+          content: '',
+          code: null,
+          result: null,
+          image: null,
+          images: [],
+          tables: [],
+          plotly_json: null,
+          log: '',
+          actions: null,
+          needsConfirmation: false,
+          riskNotes: [],
+          actionsApplied: false,
+          isApplyingActions: false,
+          thinkMs: 0,
+          isStreaming: true,  // 标记为流式消息
+        };
+        streamMsgId = item.messages.length;
+        return {
+          ...item,
+          messages: [...item.messages, newMsg],
+          isAnalyzing: true,
+          thinkingStartedAt: startedAt,
+        };
       }));
-    } catch (error) {
-       const durationMs = Date.now() - startedAt;
-       const isAbort = error?.name === 'AbortError';
-       setSessions(prev => prev.map(item => {
-         if (item.id !== sessionId) return item;
-         return {
-           ...item,
-           isAnalyzing: false,
-           thinkingStartedAt: null,
-           lastThinkMs: durationMs,
-           messages: [...item.messages, { role: 'ai', content: isAbort ? "⏹ 已停止" : "连接失败", thinkMs: durationMs }]
-         };
-       }));
-    } finally {
-      delete abortRef.current[sessionId];
+      
+      try {
+        const { streamChat } = await import('./utils/streamChat');
+        
+        await streamChat(
+          payload,
+          (data) => {
+            // 处理流式事件
+            setSessions(prev => prev.map(item => {
+              if (item.id !== sessionId || !item.messages[streamMsgId]) return item;
+              
+              const msg = item.messages[streamMsgId];
+              
+              switch (data.type) {
+                case 'thinking':
+                  // 更新思考日志
+                  streamLog += `${data.content}\n`;
+                  break;
+                
+                case 'content':
+                  // 追加内容
+                  streamContent += data.content;
+                  break;
+                
+                case 'complete':
+                  // 最终结果
+                  finalData = data.data || {};
+                  streamCode = finalData.generated_code || streamCode;
+                  streamResult = finalData.execution_result || streamResult;
+                  streamImage = finalData.image || streamImage;
+                  streamPlotlyJson = finalData.plotly_json || streamPlotlyJson;
+                  break;
+                
+                case 'error':
+                  streamContent += `\n\n❌ 错误: ${data.content}`;
+                  break;
+              }
+              
+              // 更新消息
+              const updatedMsg = {
+                ...msg,
+                content: streamContent,
+                code: streamCode || null,
+                result: streamResult || null,
+                image: streamImage,
+                plotly_json: streamPlotlyJson,
+                log: streamLog,
+                isStreaming: data.type !== 'done' && data.type !== 'complete',
+              };
+              
+              const updatedMessages = [...item.messages];
+              updatedMessages[streamMsgId] = updatedMsg;
+              
+              return {
+                ...item,
+                messages: updatedMessages,
+                isAnalyzing: data.type !== 'done' && data.type !== 'complete',
+              };
+            }));
+          },
+          (error) => {
+            const durationMs = Date.now() - startedAt;
+            setSessions(prev => prev.map(item => {
+              if (item.id !== sessionId) return item;
+              const updatedMessages = [...item.messages];
+              if (updatedMessages[streamMsgId]) {
+                updatedMessages[streamMsgId] = {
+                  ...updatedMessages[streamMsgId],
+                  content: updatedMessages[streamMsgId].content || (error.message.includes('取消') ? "⏹ 已停止" : "连接失败"),
+                  isStreaming: false,
+                  thinkMs: durationMs,
+                };
+              }
+              return {
+                ...item,
+                messages: updatedMessages,
+                isAnalyzing: false,
+                thinkingStartedAt: null,
+                lastThinkMs: durationMs,
+              };
+            }));
+          },
+          controller.signal
+        );
+        
+        // 流式完成后，处理最终数据
+        if (finalData) {
+          const durationMs = Date.now() - startedAt;
+          setSessions(prev => prev.map(item => {
+            if (item.id !== sessionId) return item;
+            const images = Array.isArray(finalData.images) ? finalData.images : ((finalData.charts || []).map(c => c?.path).filter(Boolean));
+            const tables = Array.isArray(finalData.tables) ? finalData.tables : [];
+            const suggestedActions = (finalData.suggested_actions || []).map(a => ({ ...a, checked: true }));
+            
+            const updatedMessages = [...item.messages];
+            if (updatedMessages[streamMsgId]) {
+              updatedMessages[streamMsgId] = {
+                ...updatedMessages[streamMsgId],
+                content: finalData.reply || updatedMessages[streamMsgId].content,
+                code: finalData.generated_code || updatedMessages[streamMsgId].code,
+                result: finalData.execution_result || updatedMessages[streamMsgId].result,
+                image: finalData.image || (images.length ? images[0] : null),
+                images,
+                tables,
+                plotly_json: finalData.plotly_json || updatedMessages[streamMsgId].plotly_json,
+                actions: suggestedActions.length ? suggestedActions : null,
+                needsConfirmation: !!finalData.needs_confirmation,
+                riskNotes: finalData.risk_notes || [],
+                isStreaming: false,
+                thinkMs: durationMs,
+              };
+            }
+            
+            return {
+              ...item,
+              messages: updatedMessages,
+              isAnalyzing: false,
+              thinkingStartedAt: null,
+              lastThinkMs: durationMs,
+              data: finalData.data_changed ? finalData.new_data_preview : item.data,
+              dataMeta: finalData.data_changed ? { ...item.dataMeta, rows: finalData.rows, cols: finalData.cols } : item.dataMeta,
+              history: finalData.history || item.history,
+              historyStack: finalData.history_stack || item.historyStack,
+              meta: finalData.meta || item.meta,
+              dataProfile: finalData.profile || item.dataProfile,
+            };
+          }));
+        }
+      } catch (error) {
+        const durationMs = Date.now() - startedAt;
+        const isAbort = error?.name === 'AbortError' || error.message?.includes('取消');
+        setSessions(prev => prev.map(item => {
+          if (item.id !== sessionId) return item;
+          const updatedMessages = [...item.messages];
+          if (updatedMessages[streamMsgId]) {
+            updatedMessages[streamMsgId] = {
+              ...updatedMessages[streamMsgId],
+              content: updatedMessages[streamMsgId].content || (isAbort ? "⏹ 已停止" : "连接失败"),
+              isStreaming: false,
+              thinkMs: durationMs,
+            };
+          }
+          return {
+            ...item,
+            messages: updatedMessages,
+            isAnalyzing: false,
+            thinkingStartedAt: null,
+            lastThinkMs: durationMs,
+          };
+        }));
+      } finally {
+        delete abortRef.current[sessionId];
+      }
+    } else {
+      // 传统非流式模式（向后兼容）
+      try {
+        const controller = new AbortController();
+        abortRef.current[sessionId] = controller;
+        const response = await fetch(`${API_BASE}/chat`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        const resData = await response.json();
+        const durationMs = Date.now() - startedAt;
+        
+        setSessions(prev => prev.map(item => {
+            if (item.id !== sessionId) return item;
+            const suggestedActions = (resData.suggested_actions || []).map(a => ({ ...a, checked: true }));
+            const images = Array.isArray(resData.images) ? resData.images : ((resData.charts || []).map(c => c?.path).filter(Boolean));
+            const tables = Array.isArray(resData.tables) ? resData.tables : [];
+            const newMsg = {
+                role: 'ai',
+                content: resData.reply,
+                code: resData.generated_code,
+                result: resData.execution_result,
+                image: resData.image || (images.length ? images[0] : null),
+                images,
+                tables,
+                plotly_json: resData.plotly_json || null,
+                log: resData.process_log,
+                actions: suggestedActions.length ? suggestedActions : null,
+                needsConfirmation: !!resData.needs_confirmation,
+                riskNotes: resData.risk_notes || [],
+                actionsApplied: false,
+                isApplyingActions: false,
+                thinkMs: durationMs,
+            };
+            return {
+                ...item, messages: [...item.messages, newMsg], isAnalyzing: false, thinkingStartedAt: null, lastThinkMs: durationMs,
+                data: resData.data_changed ? resData.new_data_preview : item.data,
+                dataMeta: resData.data_changed ? { ...item.dataMeta, rows: resData.rows, cols: resData.cols } : item.dataMeta,
+                history: resData.history || item.history,
+                historyStack: resData.history_stack || item.historyStack,
+                meta: resData.meta || item.meta,
+                dataProfile: resData.profile || item.dataProfile,
+            };
+        }));
+      } catch (error) {
+         const durationMs = Date.now() - startedAt;
+         const isAbort = error?.name === 'AbortError';
+         setSessions(prev => prev.map(item => {
+           if (item.id !== sessionId) return item;
+           return {
+             ...item,
+             isAnalyzing: false,
+             thinkingStartedAt: null,
+             lastThinkMs: durationMs,
+             messages: [...item.messages, { role: 'ai', content: isAbort ? "⏹ 已停止" : "连接失败", thinkMs: durationMs }]
+           };
+         }));
+      } finally {
+        delete abortRef.current[sessionId];
+      }
     }
   };
 
@@ -2048,6 +2259,13 @@ export default function RadarmApp() {
                            )}
                          </div>
                        )}
+                       {/* Plotly 交互式图表（优先显示） */}
+                       {msg.plotly_json && (
+                         <div className="mt-2 w-[92%]">
+                           <PlotlyChart plotlyJson={msg.plotly_json} />
+                         </div>
+                       )}
+                       {/* 静态图片（matplotlib 等） */}
                        {msg.images && Array.isArray(msg.images) && msg.images.length > 0 ? (
                          <div className="mt-2 flex flex-wrap gap-2">
                            {msg.images.map((p, idx) => {
@@ -2056,7 +2274,7 @@ export default function RadarmApp() {
                            })}
                          </div>
                        ) : (
-                         msg.image && (() => {
+                         msg.image && !msg.plotly_json && (() => {
                            const url = getImageUrl(msg.image);
                            return url ? <img alt="" src={url} className="mt-2 max-w-[240px] rounded-lg border border-zinc-200 shadow-sm cursor-pointer hover:ring-2 hover:ring-indigo-500 transition-all" onClick={()=>setPreviewImage(url)}/> : null;
                          })()

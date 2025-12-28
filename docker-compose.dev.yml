@@ -1,0 +1,50 @@
+# 开发环境配置：支持热重载
+# 注意：Docker Compose v2+ 不再需要 version 字段
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: radarm-backend-dev
+    ports:
+      - "8000:8000"
+    volumes:
+      # 开发时热重载：挂载代码目录
+      - .:/app
+      # 排除不需要同步的目录
+      - /app/node_modules
+      - /app/build
+      - /app/__pycache__
+      # 数据持久化
+      - ./radarm_data:/app/radarm_data
+      - ./out:/app/out
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FOR_DISABLE_CONSOLE_CTRL_HANDLER=1
+      # 开发模式：使用 uvicorn 的 reload 功能
+      - RELOAD=true
+    command: uvicorn backend:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.dev
+    container_name: radarm-frontend-dev
+    ports:
+      - "3000:3000"
+    volumes:
+      # 开发模式：挂载源代码实现热重载
+      - ./src:/app/src
+      - ./public:/app/public
+      - ./package.json:/app/package.json
+      - ./tailwind.config.js:/app/tailwind.config.js
+      - ./postcss.config.js:/app/postcss.config.js
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_BASE=http://localhost:8000
+      - CHOKIDAR_USEPOLLING=true
+    depends_on:
+      - backend
+    restart: unless-stopped
+

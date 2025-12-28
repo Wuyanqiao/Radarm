@@ -103,7 +103,7 @@ def run_single_agent_engine(
     process_log: List[str] = []
     max_attempts = 2
     code = ""
-    exec_text, exec_img, new_df = "", None, None
+    exec_text, exec_img, plotly_json, new_df = "", None, None, None
 
     for attempt in range(1, max_attempts + 1):
         # 1) 生成代码（注入数据概况）
@@ -126,7 +126,14 @@ def run_single_agent_engine(
         # 2) 执行代码
         code = _extract_python_code(ai_response)
         process_log.append("**⚙️ 执行代码...**")
-        exec_text, exec_img, new_df = execute_callback(code, df)
+        # 支持新的4元组返回： (output_text, image_path, plotly_json, new_df)
+        result = execute_callback(code, df)
+        if len(result) == 4:
+            exec_text, exec_img, plotly_json, new_df = result
+        else:
+            # 向后兼容：如果是3元组，添加 None 作为 plotly_json
+            exec_text, exec_img, new_df = result
+            plotly_json = None
 
         has_error = isinstance(exec_text, str) and (
             exec_text.startswith("Error") or "Traceback" in exec_text or "Exception" in exec_text
@@ -156,6 +163,7 @@ def run_single_agent_engine(
         "generated_code": code,
         "execution_result": exec_text,
         "image": exec_img,
+        "plotly_json": plotly_json,  # 新增：Plotly 图表 JSON
         "new_df": new_df,
         "process_log": "\n".join(process_log),
     }

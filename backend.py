@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 import pandas as pd
 import io
 import base64
@@ -38,6 +39,8 @@ from engine_clean_actions import suggest_clean_actions
 from session_store import ensure_storage_ready, load_session_from_disk, save_session_to_disk
 from analysis_engine import run_analysis
 from engine_report_v2 import run_report_engine_v2
+# 导入重构后的代码执行引擎
+from backend.app.utils.execute_code import execute_code
 
 # 引入基础工具和三个工作流
 import ml_engine as ml
@@ -1112,244 +1115,145 @@ def sanitize_df_for_json(df_slice):
     d = d.fillna("")
     return d.to_dict(orient='records')
 
-def execute_code(code_str: str, df: pd.DataFrame, session_id: str = "default"):
+# execute_code 函数已移至 backend/app/utils/execute_code.py
+# 保持向后兼容：创建一个包装函数，将旧的3元组返回转换为4元组
+def _legacy_execute_code(code_str: str, df: pd.DataFrame, session_id: str = "default"):
     """
-    代码执行沙盒
+    向后兼容包装函数：将新的4元组返回转换为旧的3元组格式
+    用于暂时兼容旧的调用代码
     """
-    # --- 安全与稳定性：禁止文件/网络/系统操作（避免读取 data.csv 等外部文件） ---
-    forbidden_patterns = [
-        r"\bimport\s+os\b",
-        r"\bimport\s+pathlib\b",
-        r"\bos\.\w+",
-        r"\bopen\s*\(",
-        r"\bpd\s*\.\s*read_csv\s*\(",
-        r"\bread_csv\s*\(",
-        r"\bpd\s*\.\s*read_excel\s*\(",
-        r"\bread_excel\s*\(",
-        r"\bpd\s*\.\s*read_parquet\s*\(",
-        r"\bread_parquet\s*\(",
-        r"\bpd\s*\.\s*read_json\s*\(",
-        r"\bread_json\s*\(",
-        r"\bimport\s+requests\b",
-        r"\brequests\.\w+",
-        r"\burllib\.\w+",
-        r"\bimport\s+urllib\b",
-        r"\bsocket\b",
-        r"\bsubprocess\b",
-        r"\bimport\s+subprocess\b",
-    ]
-    for pat in forbidden_patterns:
-        if re.search(pat, code_str, re.IGNORECASE):
-            return "禁止文件/网络/系统操作：请直接使用已提供的 df 进行分析（不要读取 data.csv 等外部文件）。", None, df
-    
-    # 预置常用依赖，减少 LLM 生成代码因 NameError 失败
-    local_vars = {
-        "df": df.copy(),
-        "pd": pd,
-        "np": np,
-        "json": json,
-        "plt": plt,
-        "sns": sns,
-        "ml": ml,
-    }
-
-    # --- 预置工具函数：列名模糊匹配（提升多专家建模命中率） ---
-    def _norm_col_name(s: str) -> str:
-        return re.sub(r"[\s\-_]+", "", str(s or "").strip().lower())
-
-    def find_col(*candidates: str):
-        """
-        在当前 df.columns 中按候选名查找真实列名；支持忽略空格/大小写与包含匹配。
-        返回：真实列名(str) 或 None
-        """
-        _df = local_vars.get("df")
-        cols = list(getattr(_df, "columns", [])) if _df is not None else []
-        norm_map = {_norm_col_name(c): c for c in cols}
-
-        # exact normalized
-        for cand in candidates or []:
-            cn = _norm_col_name(cand)
-            if cn in norm_map:
-                return norm_map[cn]
-
-        # substring
-        for cand in candidates or []:
-            cn = _norm_col_name(cand)
-            if not cn:
-                continue
-            for c in cols:
-                if cn in _norm_col_name(c):
-                    return c
-        return None
-
-    def list_cols():
-        _df = local_vars.get("df")
-        return [str(c) for c in getattr(_df, "columns", [])] if _df is not None else []
-
-    local_vars["find_col"] = find_col
-    local_vars["list_cols"] = list_cols
-    
-    # --- 回归模板工具函数（不依赖 statsmodels，用 scipy.stats 实现） ---
-    def fit_linear_regression(y, X, feature_names=None):
-        """
-        拟合线性回归模型，返回系数、p值、R²、置信区间等。
-        
-        参数:
-            y: 目标变量（1D array 或 Series）
-            X: 特征矩阵（2D array 或 DataFrame，每列一个特征）
-            feature_names: 特征名称列表（可选，用于输出）
-        
-        返回:
-            dict: {
-                "coefficients": [系数列表],
-                "pvalues": [p值列表],
-                "r_squared": R²,
-                "adj_r_squared": 调整R²,
-                "n": 样本量,
-                "summary": "格式化文本摘要",
-                "feature_names": [特征名列表]
-            }
-        """
-        # 转为数值（对象/字符串会被 coercion 为 NaN）
-        y_ser = pd.Series(y)
-        y_num = pd.to_numeric(y_ser, errors="coerce").to_numpy(dtype=float)
-        
-        if isinstance(X, pd.DataFrame):
-            X_df = X.copy()
-            if feature_names is None:
-                try:
-                    feature_names = [str(c) for c in X_df.columns]
-                except Exception:
-                    pass
-        else:
-            X_arr = np.array(X)
-            if X_arr.ndim == 1:
-                X_arr = X_arr.reshape(-1, 1)
-            X_df = pd.DataFrame(X_arr)
-        
-        X_num = X_df.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-        
-        # 移除缺失值
-        mask = ~(np.isnan(y_num) | np.isnan(X_num).any(axis=1))
-        y_clean = y_num[mask]
-        X_clean = X_num[mask, :]
-        
-        if len(y_clean) < 2:
-            return {"error": "样本量不足（n<2）或缺失值过多"}
-        
-        # 添加截距项
-        X_with_intercept = np.column_stack([np.ones(len(X_clean)), X_clean])
-        
-        # OLS 估计：beta = (X'X)^(-1) X'y
-        try:
-            beta = np.linalg.lstsq(X_with_intercept, y_clean, rcond=None)[0]
-        except:
-            return {"error": "矩阵不可逆或数值不稳定"}
-        
-        # 预测值与残差
-        y_pred = X_with_intercept @ beta
-        residuals = y_clean - y_pred
-        
-        # R²
-        ss_res = np.sum(residuals ** 2)
-        ss_tot = np.sum((y_clean - np.mean(y_clean)) ** 2)
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-        
-        # 调整R²
-        n, k = len(y_clean), len(beta) - 1
-        adj_r_squared = 1 - (1 - r_squared) * (n - 1) / (n - k - 1) if n > k + 1 else r_squared
-        
-        # 标准误与 t 统计量（用于 p 值）
-        mse = ss_res / (n - k - 1) if n > k + 1 else ss_res / max(1, n - 1)
-        try:
-            var_beta = mse * np.linalg.inv(X_with_intercept.T @ X_with_intercept)
-            se_beta = np.sqrt(np.diag(var_beta))
-            t_stats = beta / se_beta
-            # 双侧 t 检验 p 值
-            pvalues = 2 * (1 - stats.t.cdf(np.abs(t_stats), n - k - 1))
-        except:
-            se_beta = np.full(len(beta), np.nan)
-            t_stats = np.full(len(beta), np.nan)
-            pvalues = np.full(len(beta), np.nan)
-        
-        # 95% 置信区间
-        t_crit = stats.t.ppf(0.975, n - k - 1) if n > k + 1 else 1.96
-        ci_lower = beta - t_crit * se_beta
-        ci_upper = beta + t_crit * se_beta
-        
-        # 格式化摘要
-        feature_names = feature_names or [f"特征{i+1}" for i in range(k)]
-        summary_lines = [f"线性回归结果 (n={n}):", ""]
-        summary_lines.append(f"截距: {beta[0]:.4f} (p={pvalues[0]:.4f}, 95%CI: [{ci_lower[0]:.4f}, {ci_upper[0]:.4f}])")
-        for i, name in enumerate(feature_names):
-            idx = i + 1
-            if idx < len(beta):
-                summary_lines.append(f"{name}: {beta[idx]:.4f} (p={pvalues[idx]:.4f}, 95%CI: [{ci_lower[idx]:.4f}, {ci_upper[idx]:.4f}])")
-        summary_lines.append(f"\nR² = {r_squared:.4f}, 调整R² = {adj_r_squared:.4f}")
-        
-        return {
-            "coefficients": beta.tolist(),
-            "pvalues": pvalues.tolist(),
-            "r_squared": float(r_squared),
-            "adj_r_squared": float(adj_r_squared),
-            "n": int(n),
-            "summary": "\n".join(summary_lines),
-            "feature_names": ["截距"] + feature_names,
-            "ci_lower": ci_lower.tolist(),
-            "ci_upper": ci_upper.tolist(),
-        }
-    
-    local_vars["fit_linear_regression"] = fit_linear_regression
-    local_vars["stats"] = stats  # 也提供 scipy.stats 供其他统计检验用
-    local_vars["_session_id"] = session_id  # 传递给图表保存逻辑
-    
-    plt.clf()
-    
-    try:
-        # 捕获 print 输出
-        import sys
-        from io import StringIO
-        old_stdout = sys.stdout
-        redirected_output = StringIO()
-        sys.stdout = redirected_output
-        
-        exec(code_str, {}, local_vars)
-        
-        sys.stdout = old_stdout
-        print_output = redirected_output.getvalue()
-        
-        text_res = str(local_vars.get('result', "执行成功"))
-        
-        # 优先使用 print 的内容作为硬结论，如果没有 print，则使用 result 变量
-        final_output = print_output if print_output.strip() else text_res
-        
-        # 图表保存到 out/{session_id}/ 目录（不再返回 base64）
-        img_path = None
-        if plt.get_fignums():
-            # 从调用栈中提取 session_id（通过 inspect 或全局变量传递）
-            session_id = local_vars.get("_session_id", "default")
-            out_dir = Path("out") / session_id
-            out_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 生成唯一文件名
-            timestamp = int(time.time() * 1000)
-            filename = f"chart_{timestamp}.png"
-            filepath = out_dir / filename
-            
-            plt.savefig(str(filepath), format='png', bbox_inches='tight', dpi=300)
-            plt.close()
-            
-            # 返回相对路径（前端通过 /out/{session_id}/{filename} 访问）
-            img_path = f"{session_id}/{filename}"
-        
-        new_df = local_vars['df']
-        return final_output, img_path, new_df
-    except Exception as e:
-        import sys
-        sys.stdout = sys.__stdout__ # 恢复 stdout 防止崩溃
-        return f"Error: {str(e)}", None, df
+    output_text, img_path, plotly_json, new_df = execute_code(code_str, df, session_id)
+    return output_text, img_path, new_df
 
 # --- API 接口 ---
+
+@app.post("/chat/stream")
+async def chat_stream_endpoint(req: ChatRequest):
+    """
+    流式聊天接口 - SSE (Server-Sent Events)
+    实时返回 Agent 思考过程和生成内容
+    """
+    from backend.app.services.llm_service import LLMService
+    from backend.app.services.agent_stream_service import run_multi_agent_engine_stream
+    
+    session = get_session_data(req.session_id)
+    current_df = session['df']
+    
+    # 统一模式名
+    mode = _normalize_mode(getattr(req, "mode", "agent_single"))
+    
+    # 准备数据上下文
+    data_context = req.dataContext or session.get("profile_context", "")
+    
+    # 处理 @ 引用
+    try:
+        at_tokens = _extract_at_mentions(req.message or "")
+        at_ctx = _build_at_context(current_df, at_tokens)
+        if at_ctx:
+            data_context = (data_context or "") + "\n\n[用户引用(@)数据]\n" + at_ctx
+    except Exception:
+        pass
+    
+    # 准备 API Keys
+    api_keys = req.apiKeys or {}
+    
+    # 获取 LLM 服务（使用连接池）
+    llm_service = LLMService(use_pool=True)
+    await llm_service.__aenter__()
+    
+    async def generate():
+        try:
+            if mode == "agent_multi":
+                # 多专家模式
+                from backend.app.services.agent_stream_service import run_multi_agent_engine_stream
+                
+                roles_in = req.agentRoles if isinstance(req.agentRoles, dict) else {}
+                roles = {"planner": "deepseekA", "executor": "deepseekB", "verifier": "deepseekC"}
+                overrides: Dict[str, str] = {}
+                for r in ("planner", "executor", "verifier"):
+                    rc = roles_in.get(r) if isinstance(roles_in.get(r), dict) else {}
+                    prov = str(rc.get("provider") or roles[r])
+                    roles[r] = prov
+                    if rc.get("model"):
+                        overrides[prov] = str(rc.get("model"))
+                
+                mc = _apply_model_overrides(MODEL_CONFIG, overrides)
+                
+                def execute_with_session(code_str, df):
+                    return execute_code(code_str, df, session_id=req.session_id)
+                
+                async for event in run_multi_agent_engine_stream(
+                    user_query=req.message,
+                    data_context=data_context,
+                    api_keys=api_keys,
+                    model_config=mc,
+                    roles=roles,
+                    execute_callback=execute_with_session,
+                    df=current_df,
+                    llm_service=llm_service,
+                ):
+                    yield f"data: {event}\n\n"
+            
+            elif mode == "agent_single":
+                # 单模型模式
+                from backend.app.services.agent_stream_service_single import run_single_agent_engine_stream
+                
+                sel = (req.modelSelection or {}) if isinstance(req.modelSelection, dict) else {}
+                provider = str(sel.get("provider") or "deepseekA")
+                overrides = {provider: str(sel.get("model"))} if sel.get("model") else {}
+                mc = _apply_model_overrides(MODEL_CONFIG, overrides)
+                
+                def execute_with_session(code_str, df):
+                    return execute_code(code_str, df, session_id=req.session_id)
+                
+                async for event in run_single_agent_engine_stream(
+                    user_query=req.message,
+                    data_context=data_context,
+                    api_keys=api_keys,
+                    model_config=mc,
+                    primary_model=provider,
+                    execute_callback=execute_with_session,
+                    df=current_df,
+                    llm_service=llm_service,
+                ):
+                    yield f"data: {event}\n\n"
+            
+            elif mode == "ask":
+                # Ask 模式（简单问答）
+                from backend.app.services.agent_stream_service_ask import run_ask_stream
+                
+                sel = (req.modelSelection or {}) if isinstance(req.modelSelection, dict) else {}
+                provider = str(sel.get("provider") or "deepseekA")
+                model = str(sel.get("model") or MODEL_CONFIG.get(provider, {}).get("model", ""))
+                mc = MODEL_CONFIG
+                
+                async for event in run_ask_stream(
+                    user_query=req.message,
+                    api_keys=api_keys,
+                    model_config=mc,
+                    provider=provider,
+                    model=model,
+                    llm_service=llm_service,
+                ):
+                    yield f"data: {event}\n\n"
+            
+            else:
+                yield f"data: {json.dumps({'type': 'error', 'content': f'不支持的模式: {mode}'})}\n\n"
+        
+        finally:
+            await llm_service.__aexit__(None, None, None)
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
 
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
@@ -1910,6 +1814,7 @@ async def chat_endpoint(req: ChatRequest):
         "generated_code": result.get("generated_code"),
         "execution_result": result.get("execution_result"),
         "image": result.get("image"),
+        "plotly_json": result.get("plotly_json"),  # 新增：Plotly 图表 JSON
         "new_data_preview": sanitize_df_for_json(current_df.head(2000)),
         "rows": len(current_df),
         "cols": len(current_df.columns),
