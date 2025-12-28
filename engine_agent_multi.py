@@ -372,14 +372,7 @@ def run_multi_agent_engine(
         code = _extract_python_code(code_res)
 
         process_log.append("**⚙️ 运行代码...**")
-        # 支持新的4元组返回： (output_text, image_path, plotly_json, new_df)
-        result = execute_callback(code, df)
-        if len(result) == 4:
-            exec_text, exec_img, plotly_json, new_df = result
-        else:
-            # 向后兼容：如果是3元组，添加 None 作为 plotly_json
-            exec_text, exec_img, new_df = result
-            plotly_json = None
+        exec_text, exec_img, new_df = execute_callback(code, df)
 
         has_error = False
         if isinstance(exec_text, str) and (exec_text.startswith("Error") or "Traceback" in exec_text):
@@ -427,7 +420,6 @@ def run_multi_agent_engine(
                 "generated_code": code,
                 "execution_result": exec_text,
                 "image": exec_img,
-                "plotly_json": plotly_json,  # 新增：Plotly 图表 JSON
                 "new_df": new_df,
                 "process_log": "\n".join(process_log),
             }
@@ -441,7 +433,6 @@ def run_multi_agent_engine(
         "generated_code": code,
         "execution_result": exec_text,
         "image": exec_img,
-        "plotly_json": plotly_json,  # 新增：Plotly 图表 JSON
         "new_df": new_df,
         "process_log": "\n".join(process_log),
     }

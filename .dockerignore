@@ -1,60 +1,59 @@
-# Python
+# Git 相关
+.git
+.gitignore
+.gitattributes
+
+# 文档
+README.md
+DEPLOYMENT.md
+*.md
+
+# 环境变量和配置文件（运行时挂载）
+.env
+.env.*
+
+# 数据目录（运行时挂载）
+radarm_data/
+out/
+
+# 前端开发文件
+node_modules/
+src/
+public/
+package*.json
+tailwind.config.js
+postcss.config.js
+
+# Python 相关
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
 venv/
+env/
 ENV/
 .venv
-
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Build outputs
-build/
-dist/
 *.egg-info/
+dist/
+build/
 
-# IDE
+# IDE 相关
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
-# OS
+# 测试相关
+coverage/
+.pytest_cache/
+*.log
+
+# 操作系统相关
 .DS_Store
 Thumbs.db
 
-# Data directories (will be mounted as volumes)
-radarm_data/
-out/
-
-# Git
-.git/
-.gitignore
-
-# Docker
-docker-compose.yml
-Dockerfile
-.dockerignore
-
-# Documentation
-README.md
-*.md
-
-# Testing
-.coverage
-.pytest_cache/
-htmlcov/
-
-# Environment files
-.env
-.env.local
-.env.*.local
+# 启动脚本
+start*.bat
+start*.sh
 

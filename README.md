@@ -1,8 +1,54 @@
-# **Radarm 本地部署与使用指南 🚀**
+# **Radarm 数据分析平台 🚀**
 
 Radarm 是一个集成机器学习、多专家协作（Multi-Agent）和数据库连接的现代数据分析平台。
 
-本指南将帮助你在本地环境（Windows/macOS/Linux）快速部署 Radarm。
+## 📖 快速开始
+
+### 方式一：使用启动脚本（推荐，最简单）
+
+**Windows:**
+```bash
+# 启动后端
+start.bat
+
+# 启动前端（新开一个终端窗口）
+start-frontend.bat
+```
+
+**Linux/macOS:**
+```bash
+# 给脚本添加执行权限（首次使用）
+chmod +x start.sh start-frontend.sh
+
+# 启动后端
+./start.sh
+
+# 启动前端（新开一个终端窗口）
+./start-frontend.sh
+```
+
+### 方式二：Docker 一键部署
+
+```bash
+# 使用 Docker Compose
+docker-compose up -d
+
+# 访问 http://localhost:8000
+```
+
+### 方式三：手动部署
+
+详细的手动部署步骤请参考 [DEPLOYMENT.md](./DEPLOYMENT.md) 文档。
+
+---
+
+## 📚 文档导航
+
+- **[快速部署指南](#本地部署指南)** - 本文档的快速部署说明
+- **[详细部署文档](./DEPLOYMENT.md)** - 包含 Docker、生产环境等详细部署说明
+- **[环境变量配置](./env.example)** - 环境变量配置示例
+
+---
 
 ## **🛠️ 第一步：环境准备**
 
@@ -10,6 +56,8 @@ Radarm 是一个集成机器学习、多专家协作（Multi-Agent）和数据�
 
 1. **Node.js** (用于前端): [下载地址](https://nodejs.org/) (建议版本 v16 或更高)  
 2. **Python** (用于后端): [下载地址](https://www.python.org/) (建议版本 3.8 或更高)
+
+> 💡 **提示**: 需要详细的部署说明、Docker 部署或生产环境配置？请查看 [DEPLOYMENT.md](./DEPLOYMENT.md)
 
 ## **🖥️ 第二步：前端部署 (React)**
 
@@ -163,3 +211,31 @@ A: 后端已默认配置 SimHei (黑体) 和 Microsoft YaHei。如果你的服�
 - `DEEPSEEK_BASE_URL`：统一基础 URL（默认 `https://api.deepseek.com/chat/completions`）
 - `DEEPSEEK_A_URL` / `DEEPSEEK_B_URL` / `DEEPSEEK_C_URL`：分别覆盖 A/B/C 的 URL
 - `DEEPSEEK_A_MODEL` / `DEEPSEEK_B_MODEL` / `DEEPSEEK_C_MODEL`：分别覆盖 A/B/C 的模型名（默认 `deepseek-reasoner`）
+
+### 环境变量配置
+
+可以通过环境变量或 `.env` 文件配置 API 和其他设置：
+
+1. 复制环境变量示例文件：
+   ```bash
+   cp env.example .env
+   ```
+
+2. 编辑 `.env` 文件，填入你的配置（可选）
+
+详细的环境变量说明请参考 [env.example](./env.example) 文件。
+
+---
+
+## 🚀 更多部署选项
+
+- **Docker 部署**: 查看 [DEPLOYMENT.md](./DEPLOYMENT.md#方式二docker-容器化部署)
+- **生产环境部署**: 查看 [DEPLOYMENT.md](./DEPLOYMENT.md#方式三生产环境部署)
+- **性能优化**: 查看 [DEPLOYMENT.md](./DEPLOYMENT.md#性能优化)
+- **常见问题**: 查看 [DEPLOYMENT.md](./DEPLOYMENT.md#常见问题)
+
+---
+
+## 📝 许可证
+
+本项目采用 MIT 许可证。

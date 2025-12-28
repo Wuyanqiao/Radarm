@@ -1,47 +1,61 @@
-# 生产环境配置
-# 注意：Docker Compose v2+ 不再需要 version 字段
+version: '3.8'
+
 services:
-  backend:
+  radarm:
     build:
       context: .
-      dockerfile: backend/Dockerfile
-    container_name: radarm-backend
+      dockerfile: Dockerfile
+    container_name: radarm-app
     ports:
       - "8000:8000"
     volumes:
-      # 数据持久化（生产环境不挂载代码，使用镜像中的代码）
+      # 持久化数据目录
       - ./radarm_data:/app/radarm_data
       - ./out:/app/out
+      # 如果需要挂载环境变量文件
+      - ./.env:/app/.env:ro
     environment:
+      # 如果使用环境变量而不是文件，可以在这里配置
+      # - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL}
+      # - ZHIPU_BASE_URL=${ZHIPU_BASE_URL}
+      # - QWEN_BASE_URL=${QWEN_BASE_URL}
       - PYTHONUNBUFFERED=1
       - FOR_DISABLE_CONSOLE_CTRL_HANDLER=1
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
-  frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    container_name: radarm-frontend
-    ports:
-      - "3000:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
-    # 如果需要开发模式热重载，可以使用以下配置替代上面的 build 配置：
-    # volumes:
-    #   - ./src:/app/src
-    #   - ./public:/app/public
-    #   - ./package.json:/app/package.json
-    #   - /app/node_modules
-    # command: npm start
+  # 可选：如果需要数据库支持，可以添加数据库服务
+  # mysql:
+  #   image: mysql:8.0
+  #   container_name: radarm-mysql
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-radarm123}
+  #     MYSQL_DATABASE: ${MYSQL_DATABASE:-radarm}
+  #   ports:
+  #     - "3306:3306"
+  #   volumes:
+  #     - mysql_data:/var/lib/mysql
+  #   restart: unless-stopped
 
-volumes:
-  radarm_data:
-  out:
+  # postgres:
+  #   image: postgres:15
+  #   container_name: radarm-postgres
+  #   environment:
+  #     POSTGRES_USER: ${POSTGRES_USER:-radarm}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-radarm123}
+  #     POSTGRES_DB: ${POSTGRES_DB:-radarm}
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+# volumes:
+#   mysql_data:
+#   postgres_data:
 

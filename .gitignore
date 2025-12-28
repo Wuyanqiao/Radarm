@@ -21,9 +21,38 @@
 .env.test.local
 .env.production.local
 
+# 环境变量文件（包含敏感信息）
+.env
+.env.*
+
+# 保留环境变量示例文件
+!env.example
+
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
 # 图表产物目录
 /out/
+
+# Python 相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE 相关
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统相关
+Thumbs.db
+.DS_Store

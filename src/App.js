@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, MessageSquare, Play, BarChart2, FileText, Settings, Database, X, Loader2, Terminal, Zap, Trash2, Copy, Server, Plus, Layers, PanelLeftClose, PanelLeft, Users, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Printer, FileDown, RotateCcw, RotateCw, SlidersHorizontal, AtSign, Globe, Image as ImageIcon, Eye, Command } from 'lucide-react';
-import PlotlyChart from './components/PlotlyChart';
 
 const uuid = () => Math.random().toString(36).substr(2, 9);
 const API_BASE = 'http://localhost:8000';
@@ -726,7 +725,6 @@ export default function RadarmApp() {
           tables: res.tables || [],
           images,
           image: res.image || (images.length ? images[0] : null),
-          plotly_json: res.plotly_json || null,  // 新增：Plotly 图表 JSON
           code: null,
           result: null,
           log: res.process_log || '',
@@ -837,7 +835,7 @@ export default function RadarmApp() {
         const updatedMessages = item.messages.map((m, i) => i === msgIdx ? { ...m, isApplyingActions: false, actionsApplied: true } : m);
         const appliedMsg = { role: 'ai', content: res.message || "已应用操作。", code: res.generated_code, result: null, image: null, log: '' };
         const follow = res.agent_followup;
-        const followMsg = (follow && follow.reply) ? { role: 'ai', content: follow.reply, code: follow.generated_code || null, result: follow.execution_result || null, image: follow.image || null, tables: follow.tables || [], images: follow.images || [], plotly_json: follow.plotly_json || null, log: follow.process_log || '' } : null;
+        const followMsg = (follow && follow.reply) ? { role: 'ai', content: follow.reply, code: follow.generated_code || null, result: follow.execution_result || null, image: follow.image || null, tables: follow.tables || [], images: follow.images || [], log: follow.process_log || '' } : null;
         return {
           ...item,
           messages: [...updatedMessages, appliedMsg, ...(followMsg ? [followMsg] : [])],
@@ -1001,7 +999,6 @@ export default function RadarmApp() {
         image: ob.image || (images.length ? images[0] : null),
         images,
         tables,
-        plotly_json: ob.plotly_json || null,  // 新增：Plotly 图表 JSON
         log: ob.process_log || '',
         actions: suggestedActions.length ? suggestedActions : null,
         needsConfirmation: !!ob.needs_confirmation,
@@ -1197,271 +1194,81 @@ export default function RadarmApp() {
       thinkingStartedAt: startedAt
     });
 
-    // 检查是否启用流式响应（默认启用，可通过设置关闭）
-    const useStream = s.enableStream !== false && (runMode === 'agent_multi' || runMode === 'agent_single');
-    
-    if (useStream) {
-      // 流式响应模式
+    try {
       const controller = new AbortController();
       abortRef.current[sessionId] = controller;
+      const response = await fetch(`${API_BASE}/chat`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
       
-      // 创建初始 AI 消息（用于流式更新）
-      let streamMsgId = null;
-      let streamContent = '';
-      let streamLog = '';
-      let streamCode = '';
-      let streamResult = '';
-      let streamImage = null;
-      let streamImages = [];
-      let streamTables = [];
-      let streamPlotlyJson = null;
-      let streamActions = null;
-      let streamNeedsConfirmation = false;
-      let streamRiskNotes = [];
-      let finalData = null;
+      if (!response.ok) {
+        let errorDetail = `HTTP ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorDetail = errorData.detail || errorData.message || errorDetail;
+        } catch (e) {
+          try {
+            const errorText = await response.text();
+            if (errorText) errorDetail = errorText.substring(0, 200);
+          } catch (e2) {
+            // 忽略解析错误
+          }
+        }
+        throw new Error(errorDetail);
+      }
+      
+      const resData = await response.json();
+      const durationMs = Date.now() - startedAt;
       
       setSessions(prev => prev.map(item => {
-        if (item.id !== sessionId) return item;
-        const newMsg = {
-          role: 'ai',
-          content: '',
-          code: null,
-          result: null,
-          image: null,
-          images: [],
-          tables: [],
-          plotly_json: null,
-          log: '',
-          actions: null,
-          needsConfirmation: false,
-          riskNotes: [],
-          actionsApplied: false,
-          isApplyingActions: false,
-          thinkMs: 0,
-          isStreaming: true,  // 标记为流式消息
-        };
-        streamMsgId = item.messages.length;
-        return {
-          ...item,
-          messages: [...item.messages, newMsg],
-          isAnalyzing: true,
-          thinkingStartedAt: startedAt,
-        };
-      }));
-      
-      try {
-        const { streamChat } = await import('./utils/streamChat');
-        
-        await streamChat(
-          payload,
-          (data) => {
-            // 处理流式事件
-            setSessions(prev => prev.map(item => {
-              if (item.id !== sessionId || !item.messages[streamMsgId]) return item;
-              
-              const msg = item.messages[streamMsgId];
-              
-              switch (data.type) {
-                case 'thinking':
-                  // 更新思考日志
-                  streamLog += `${data.content}\n`;
-                  break;
-                
-                case 'content':
-                  // 追加内容
-                  streamContent += data.content;
-                  break;
-                
-                case 'complete':
-                  // 最终结果
-                  finalData = data.data || {};
-                  streamCode = finalData.generated_code || streamCode;
-                  streamResult = finalData.execution_result || streamResult;
-                  streamImage = finalData.image || streamImage;
-                  streamPlotlyJson = finalData.plotly_json || streamPlotlyJson;
-                  break;
-                
-                case 'error':
-                  streamContent += `\n\n❌ 错误: ${data.content}`;
-                  break;
-              }
-              
-              // 更新消息
-              const updatedMsg = {
-                ...msg,
-                content: streamContent,
-                code: streamCode || null,
-                result: streamResult || null,
-                image: streamImage,
-                plotly_json: streamPlotlyJson,
-                log: streamLog,
-                isStreaming: data.type !== 'done' && data.type !== 'complete',
-              };
-              
-              const updatedMessages = [...item.messages];
-              updatedMessages[streamMsgId] = updatedMsg;
-              
-              return {
-                ...item,
-                messages: updatedMessages,
-                isAnalyzing: data.type !== 'done' && data.type !== 'complete',
-              };
-            }));
-          },
-          (error) => {
-            const durationMs = Date.now() - startedAt;
-            setSessions(prev => prev.map(item => {
-              if (item.id !== sessionId) return item;
-              const updatedMessages = [...item.messages];
-              if (updatedMessages[streamMsgId]) {
-                updatedMessages[streamMsgId] = {
-                  ...updatedMessages[streamMsgId],
-                  content: updatedMessages[streamMsgId].content || (error.message.includes('取消') ? "⏹ 已停止" : "连接失败"),
-                  isStreaming: false,
-                  thinkMs: durationMs,
-                };
-              }
-              return {
-                ...item,
-                messages: updatedMessages,
-                isAnalyzing: false,
-                thinkingStartedAt: null,
-                lastThinkMs: durationMs,
-              };
-            }));
-          },
-          controller.signal
-        );
-        
-        // 流式完成后，处理最终数据
-        if (finalData) {
-          const durationMs = Date.now() - startedAt;
-          setSessions(prev => prev.map(item => {
-            if (item.id !== sessionId) return item;
-            const images = Array.isArray(finalData.images) ? finalData.images : ((finalData.charts || []).map(c => c?.path).filter(Boolean));
-            const tables = Array.isArray(finalData.tables) ? finalData.tables : [];
-            const suggestedActions = (finalData.suggested_actions || []).map(a => ({ ...a, checked: true }));
-            
-            const updatedMessages = [...item.messages];
-            if (updatedMessages[streamMsgId]) {
-              updatedMessages[streamMsgId] = {
-                ...updatedMessages[streamMsgId],
-                content: finalData.reply || updatedMessages[streamMsgId].content,
-                code: finalData.generated_code || updatedMessages[streamMsgId].code,
-                result: finalData.execution_result || updatedMessages[streamMsgId].result,
-                image: finalData.image || (images.length ? images[0] : null),
-                images,
-                tables,
-                plotly_json: finalData.plotly_json || updatedMessages[streamMsgId].plotly_json,
-                actions: suggestedActions.length ? suggestedActions : null,
-                needsConfirmation: !!finalData.needs_confirmation,
-                riskNotes: finalData.risk_notes || [],
-                isStreaming: false,
-                thinkMs: durationMs,
-              };
-            }
-            
-            return {
-              ...item,
-              messages: updatedMessages,
-              isAnalyzing: false,
-              thinkingStartedAt: null,
-              lastThinkMs: durationMs,
-              data: finalData.data_changed ? finalData.new_data_preview : item.data,
-              dataMeta: finalData.data_changed ? { ...item.dataMeta, rows: finalData.rows, cols: finalData.cols } : item.dataMeta,
-              history: finalData.history || item.history,
-              historyStack: finalData.history_stack || item.historyStack,
-              meta: finalData.meta || item.meta,
-              dataProfile: finalData.profile || item.dataProfile,
-            };
-          }));
-        }
-      } catch (error) {
-        const durationMs = Date.now() - startedAt;
-        const isAbort = error?.name === 'AbortError' || error.message?.includes('取消');
-        setSessions(prev => prev.map(item => {
           if (item.id !== sessionId) return item;
-          const updatedMessages = [...item.messages];
-          if (updatedMessages[streamMsgId]) {
-            updatedMessages[streamMsgId] = {
-              ...updatedMessages[streamMsgId],
-              content: updatedMessages[streamMsgId].content || (isAbort ? "⏹ 已停止" : "连接失败"),
-              isStreaming: false,
+          const suggestedActions = (resData.suggested_actions || []).map(a => ({ ...a, checked: true }));
+          const images = Array.isArray(resData.images) ? resData.images : ((resData.charts || []).map(c => c?.path).filter(Boolean));
+          const tables = Array.isArray(resData.tables) ? resData.tables : [];
+          const newMsg = {
+              role: 'ai',
+              content: resData.reply,
+              code: resData.generated_code,
+              result: resData.execution_result,
+              image: resData.image || (images.length ? images[0] : null),
+              images,
+              tables,
+              log: resData.process_log,
+              actions: suggestedActions.length ? suggestedActions : null,
+              needsConfirmation: !!resData.needs_confirmation,
+              riskNotes: resData.risk_notes || [],
+              actionsApplied: false,
+              isApplyingActions: false,
               thinkMs: durationMs,
-            };
-          }
-          return {
-            ...item,
-            messages: updatedMessages,
-            isAnalyzing: false,
-            thinkingStartedAt: null,
-            lastThinkMs: durationMs,
           };
-        }));
-      } finally {
-        delete abortRef.current[sessionId];
-      }
-    } else {
-      // 传统非流式模式（向后兼容）
-      try {
-        const controller = new AbortController();
-        abortRef.current[sessionId] = controller;
-        const response = await fetch(`${API_BASE}/chat`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal
-        });
-        const resData = await response.json();
-        const durationMs = Date.now() - startedAt;
-        
-        setSessions(prev => prev.map(item => {
-            if (item.id !== sessionId) return item;
-            const suggestedActions = (resData.suggested_actions || []).map(a => ({ ...a, checked: true }));
-            const images = Array.isArray(resData.images) ? resData.images : ((resData.charts || []).map(c => c?.path).filter(Boolean));
-            const tables = Array.isArray(resData.tables) ? resData.tables : [];
-            const newMsg = {
-                role: 'ai',
-                content: resData.reply,
-                code: resData.generated_code,
-                result: resData.execution_result,
-                image: resData.image || (images.length ? images[0] : null),
-                images,
-                tables,
-                plotly_json: resData.plotly_json || null,
-                log: resData.process_log,
-                actions: suggestedActions.length ? suggestedActions : null,
-                needsConfirmation: !!resData.needs_confirmation,
-                riskNotes: resData.risk_notes || [],
-                actionsApplied: false,
-                isApplyingActions: false,
-                thinkMs: durationMs,
-            };
-            return {
-                ...item, messages: [...item.messages, newMsg], isAnalyzing: false, thinkingStartedAt: null, lastThinkMs: durationMs,
-                data: resData.data_changed ? resData.new_data_preview : item.data,
-                dataMeta: resData.data_changed ? { ...item.dataMeta, rows: resData.rows, cols: resData.cols } : item.dataMeta,
-                history: resData.history || item.history,
-                historyStack: resData.history_stack || item.historyStack,
-                meta: resData.meta || item.meta,
-                dataProfile: resData.profile || item.dataProfile,
-            };
-        }));
-      } catch (error) {
-         const durationMs = Date.now() - startedAt;
-         const isAbort = error?.name === 'AbortError';
-         setSessions(prev => prev.map(item => {
-           if (item.id !== sessionId) return item;
-           return {
-             ...item,
-             isAnalyzing: false,
-             thinkingStartedAt: null,
-             lastThinkMs: durationMs,
-             messages: [...item.messages, { role: 'ai', content: isAbort ? "⏹ 已停止" : "连接失败", thinkMs: durationMs }]
-           };
-         }));
-      } finally {
-        delete abortRef.current[sessionId];
-      }
+          return {
+              ...item, messages: [...item.messages, newMsg], isAnalyzing: false, thinkingStartedAt: null, lastThinkMs: durationMs,
+              data: resData.data_changed ? resData.new_data_preview : item.data,
+              dataMeta: resData.data_changed ? { ...item.dataMeta, rows: resData.rows, cols: resData.cols } : item.dataMeta,
+              history: resData.history || item.history,
+              historyStack: resData.history_stack || item.historyStack,
+              meta: resData.meta || item.meta,
+              dataProfile: resData.profile || item.dataProfile,
+          };
+      }));
+    } catch (error) {
+       const durationMs = Date.now() - startedAt;
+       const isAbort = error?.name === 'AbortError';
+       const errorMsg = isAbort ? "⏹ 已停止" : (error?.message || "连接失败");
+       setSessions(prev => prev.map(item => {
+         if (item.id !== sessionId) return item;
+         return {
+           ...item,
+           isAnalyzing: false,
+           thinkingStartedAt: null,
+           lastThinkMs: durationMs,
+           messages: [...item.messages, { role: 'ai', content: `❌ ${errorMsg}`, thinkMs: durationMs }]
+         };
+       }));
+    } finally {
+      delete abortRef.current[sessionId];
     }
   };
 
@@ -1770,7 +1577,7 @@ export default function RadarmApp() {
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-xl bg-zinc-900 text-white flex items-center justify-center shadow-sm">
               <Layers size={18}/>
-            </div>
+        </div>
             <span className="font-bold text-lg tracking-tight text-zinc-900">Radarm</span>
           </div>
           <button onClick={() => setIsSidebarOpen(false)} className="text-zinc-400 hover:text-zinc-900 transition-colors"><PanelLeftClose size={20} /></button>
@@ -1783,7 +1590,7 @@ export default function RadarmApp() {
                  <div className="flex flex-col min-w-0">
                    <span className="font-medium text-sm truncate">{s.name}</span>
                    <span className={`text-[10px] truncate ${activeSessionId === s.id ? 'text-zinc-400' : 'text-zinc-400'}`}>{s.dataMeta.filename}</span>
-                 </div>
+              </div>
               </div>
               <button onClick={(e) => removeSession(e, s.id)} className={`opacity-0 group-hover:opacity-100 p-1.5 rounded-lg transition-all ${activeSessionId === s.id ? 'hover:bg-white/20 text-white' : 'hover:bg-zinc-200 text-zinc-500'}`}><X size={14}/></button>
             </div>
@@ -2259,13 +2066,6 @@ export default function RadarmApp() {
                            )}
                          </div>
                        )}
-                       {/* Plotly 交互式图表（优先显示） */}
-                       {msg.plotly_json && (
-                         <div className="mt-2 w-[92%]">
-                           <PlotlyChart plotlyJson={msg.plotly_json} />
-                         </div>
-                       )}
-                       {/* 静态图片（matplotlib 等） */}
                        {msg.images && Array.isArray(msg.images) && msg.images.length > 0 ? (
                          <div className="mt-2 flex flex-wrap gap-2">
                            {msg.images.map((p, idx) => {
@@ -2274,7 +2074,7 @@ export default function RadarmApp() {
                            })}
                          </div>
                        ) : (
-                         msg.image && !msg.plotly_json && (() => {
+                         msg.image && (() => {
                            const url = getImageUrl(msg.image);
                            return url ? <img alt="" src={url} className="mt-2 max-w-[240px] rounded-lg border border-zinc-200 shadow-sm cursor-pointer hover:ring-2 hover:ring-indigo-500 transition-all" onClick={()=>setPreviewImage(url)}/> : null;
                          })()
@@ -2365,22 +2165,22 @@ export default function RadarmApp() {
                            <div key={idx} className="relative group shrink-0">
                              <img src={getImageUrl(p)} className="w-12 h-12 rounded-lg object-cover border border-zinc-200" />
                              <button onClick={() => updateSession(activeSession.id, { askImages: activeSession.askImages.filter((_, i) => i !== idx) })} className="absolute -top-1 -right-1 bg-zinc-900 text-white rounded-full p-0.5 w-4 h-4 flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition-opacity"><X size={8}/></button>
-                           </div>
+                          </div>
                          ))}
-                       </div>
-                     )}
+                    </div>
+                  )}
 
                      <div className="relative bg-zinc-50 border border-zinc-200 rounded-2xl focus-within:ring-2 focus-within:ring-indigo-100 focus-within:border-indigo-300 transition-all shadow-inner">
-                        <textarea
-                          ref={chatInputRef}
-                          value={activeSession.inputValue}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            updateSession(activeSession.id, { inputValue: v });
-                            updateMentionState(v, e.target.selectionStart, getColumnsList(activeSession));
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(activeSession.id); }
+                    <textarea
+                      ref={chatInputRef}
+                      value={activeSession.inputValue}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        updateSession(activeSession.id, { inputValue: v });
+                        updateMentionState(v, e.target.selectionStart, getColumnsList(activeSession));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(activeSession.id); }
                             if (e.key === 'Escape') setMentionOpen(false);
                           }}
                           className="w-full bg-transparent border-none focus:ring-0 focus:outline-none p-3 text-sm text-zinc-800 placeholder-zinc-400 min-h-[44px] max-h-32 resize-none"
@@ -2390,33 +2190,33 @@ export default function RadarmApp() {
                         <input type="file" ref={imageInputRef} onChange={(e) => handleAskImageUpload(e, activeSession.id)} className="hidden" accept="image/*"/>
                         <div className="flex items-center justify-between px-2 pb-2">
                            <div className="flex items-center gap-1">
-                              <button 
+                            <button
                                 onClick={() => setShowModeModal(true)}
                                 className="p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200/50 rounded-lg transition-colors"
                                 title="模式与模型设置"
                               >
                                 <Command size={16}/>
-                              </button>
+                            </button>
                               <button onClick={() => updateSession(activeSession.id, { askWebSearch: !activeSession.askWebSearch })} className={`p-1.5 rounded-lg transition-colors ${activeSession.askWebSearch ? 'text-blue-500 bg-blue-50' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200/50'}`}><Globe size={16}/></button>
                               <button onClick={() => imageInputRef.current?.click()} className="p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200/50 rounded-lg transition-colors"><ImageIcon size={16}/></button>
                               <button onClick={openMentionPicker} className="p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-200/50 rounded-lg transition-colors"><AtSign size={16}/></button>
-                           </div>
-                           
-                           {activeSession.isAnalyzing ? (
+           </div>
+
+                      {activeSession.isAnalyzing ? (
                              <button onClick={() => handleStopThinking(activeSession.id)} className="w-8 h-8 flex items-center justify-center bg-zinc-200 text-zinc-600 rounded-full hover:bg-zinc-300 transition-colors"><div className="w-2.5 h-2.5 bg-current rounded-sm"/></button>
-                           ) : (
+                      ) : (
                              <button onClick={() => handleSendMessage(activeSession.id)} disabled={!activeSession.inputValue.trim()} className="w-8 h-8 flex items-center justify-center bg-zinc-900 text-white rounded-full hover:scale-105 active:scale-95 disabled:opacity-30 disabled:scale-100 transition-all shadow-md shadow-zinc-300"><Play size={14} fill="currentColor" className="ml-0.5"/></button>
-                           )}
-                        </div>
-                     </div>
+                      )}
+                    </div>
+                  </div>
                      {mentionOpen && (
                         <div className="absolute bottom-full left-4 right-4 mb-2 bg-white rounded-xl shadow-2xl border border-zinc-100 max-h-48 overflow-y-auto py-1 z-50">
                           {getColumnsList(activeSession).filter(c => !mentionQuery || String(c).toLowerCase().includes(mentionQuery.toLowerCase())).map(c => (
                             <button key={c} onClick={() => insertMention(c)} className="w-full text-left px-4 py-2 text-sm text-zinc-700 hover:bg-indigo-50 hover:text-indigo-700 transition-colors">@{c}</button>
                           ))}
-                        </div>
+                </div>
                      )}
-                  </div>
+              </div>
                 </>
               ) : (
                 <button onClick={() => setIsChatOpen(true)} className="h-full w-full flex items-center justify-center text-zinc-400 hover:bg-zinc-50" title="展开聊天">
@@ -2437,15 +2237,15 @@ export default function RadarmApp() {
             </div>
             <div className="px-5 pt-4 pb-2">
               <div className="flex p-1 bg-zinc-100 rounded-xl">
-                {[
-                  { key: 'column', label: '列属性' },
+              {[
+                { key: 'column', label: '列属性' },
                   { key: 'history', label: '历史栈' },
                   { key: 'clean', label: '清洗' },
                   { key: 'analysis', label: '分析库' },
-                ].map(t => (
+              ].map(t => (
                   <button key={t.key} onClick={() => setToolTab(t.key)} className={`flex-1 py-1.5 text-xs font-medium rounded-lg transition-all ${toolTab === t.key ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-900'}`}>{t.label}</button>
-                ))}
-              </div>
+              ))}
+            </div>
             </div>
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
               {toolTab === 'column' && (
@@ -2727,15 +2527,35 @@ export default function RadarmApp() {
                         );
                       }
                       if (f.type === 'columns') {
+                        const selectedCols = Array.isArray(v) ? v : [];
                         return (
-                          <select
-                            multiple
-                            value={Array.isArray(v) ? v : []}
-                            onChange={(e) => updateAnalysisFormField(algo.id, f.key, Array.from(e.target.selectedOptions).map(o => o.value))}
-                            className="w-full border rounded px-2 py-1 text-xs h-24"
-                          >
-                            {cols.map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                            {cols.length === 0 ? (
+                              <div className="text-slate-400 py-1">暂无可用列</div>
+                            ) : (
+                              cols.map(c => (
+                                <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedCols.includes(c)}
+                                    onChange={(e) => {
+                                      const newSelection = e.target.checked
+                                        ? [...selectedCols, c]
+                                        : selectedCols.filter(col => col !== c);
+                                      updateAnalysisFormField(algo.id, f.key, newSelection);
+                                    }}
+                                    className="mr-2"
+                                  />
+                                  <span className="text-xs">{c}</span>
+                                </label>
+                              ))
+                            )}
+                            {f.required === false && (
+                              <div className="text-[10px] text-slate-400 mt-1 pt-1 border-t border-slate-200">
+                                留空=使用全部数值列
+                              </div>
+                            )}
+                          </div>
                         );
                       }
                       if (f.type === 'number') {
@@ -2823,9 +2643,25 @@ export default function RadarmApp() {
                       </div>
                       <div>
                         <div className="text-[11px] font-bold text-slate-600 mb-1">描述统计：选择列（可多选）</div>
-                        <select multiple value={analysisDraft.descCols} onChange={(e) => setAnalysisDraft(prev => ({ ...prev, descCols: Array.from(e.target.selectedOptions).map(o => o.value) }))} className="w-full border rounded px-2 py-1 text-xs h-24">
-                          {getColumnsList(activeSession).map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
+                        <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                          {getColumnsList(activeSession).map(c => (
+                            <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={(analysisDraft.descCols || []).includes(c)}
+                                onChange={(e) => {
+                                  const current = analysisDraft.descCols || [];
+                                  const newCols = e.target.checked
+                                    ? [...current, c]
+                                    : current.filter(col => col !== c);
+                                  setAnalysisDraft(prev => ({ ...prev, descCols: newCols }));
+                                }}
+                                className="mr-2"
+                              />
+                              <span className="text-xs">{c}</span>
+                            </label>
+                          ))}
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-3 gap-2">
@@ -3046,9 +2882,25 @@ export default function RadarmApp() {
                             ) : (
                               <>
                                 <div className="text-[11px] font-bold text-slate-600 mb-1">列（可多选，≥3）</div>
-                                <select multiple value={analysisDraft.nonparamCols} onChange={(e) => setAnalysisDraft(prev => ({ ...prev, nonparamCols: Array.from(e.target.selectedOptions).map(o => o.value) }))} className="w-full border rounded px-2 py-1 text-xs h-20">
-                                  {getColumnsList(activeSession).map(c => <option key={c} value={c}>{c}</option>)}
-                                </select>
+                                <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                                  {getColumnsList(activeSession).map(c => (
+                                    <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={(analysisDraft.nonparamCols || []).includes(c)}
+                                        onChange={(e) => {
+                                          const current = analysisDraft.nonparamCols || [];
+                                          const newCols = e.target.checked
+                                            ? [...current, c]
+                                            : current.filter(col => col !== c);
+                                          setAnalysisDraft(prev => ({ ...prev, nonparamCols: newCols }));
+                                        }}
+                                        className="mr-2"
+                                      />
+                                      <span className="text-xs">{c}</span>
+                                    </label>
+                                  ))}
+                                </div>
                               </>
                             )}
                           </div>
@@ -3088,9 +2940,28 @@ export default function RadarmApp() {
                         </div>
                         <div className="col-span-2">
                           <div className="text-[11px] font-bold text-slate-600 mb-1">列（可多选，留空=全数值列）</div>
-                          <select multiple value={analysisDraft.corrCols} onChange={(e) => setAnalysisDraft(prev => ({ ...prev, corrCols: Array.from(e.target.selectedOptions).map(o => o.value) }))} className="w-full border rounded px-2 py-1 text-xs h-20">
-                            {getColumnsList(activeSession).map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                            {getColumnsList(activeSession).map(c => (
+                              <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={(analysisDraft.corrCols || []).includes(c)}
+                                  onChange={(e) => {
+                                    const current = analysisDraft.corrCols || [];
+                                    const newCols = e.target.checked
+                                      ? [...current, c]
+                                      : current.filter(col => col !== c);
+                                    setAnalysisDraft(prev => ({ ...prev, corrCols: newCols }));
+                                  }}
+                                  className="mr-2"
+                                />
+                                <span className="text-xs">{c}</span>
+                              </label>
+                            ))}
+                            <div className="text-[10px] text-slate-400 mt-1 pt-1 border-t border-slate-200">
+                              留空=使用全部数值列
+                            </div>
+                          </div>
                         </div>
                       </div>
                       <button onClick={() => runAnalysis(activeSession.id, 'correlation', { method: analysisDraft.corrMethod, columns: analysisDraft.corrCols || [] }, `【分析】相关性分析(${analysisDraft.corrMethod})`)} className="w-full px-3 py-2 rounded bg-indigo-600 text-white text-xs hover:bg-indigo-700">运行相关性分析</button>
@@ -3105,9 +2976,25 @@ export default function RadarmApp() {
                         </div>
                         <div className="col-span-2">
                           <div className="text-[11px] font-bold text-slate-600 mb-1">线性回归 X（可多选）</div>
-                          <select multiple value={analysisDraft.linregX} onChange={(e) => setAnalysisDraft(prev => ({ ...prev, linregX: Array.from(e.target.selectedOptions).map(o => o.value) }))} className="w-full border rounded px-2 py-1 text-xs h-20">
-                            {getColumnsList(activeSession).map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                            {getColumnsList(activeSession).map(c => (
+                              <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={(analysisDraft.linregX || []).includes(c)}
+                                  onChange={(e) => {
+                                    const current = analysisDraft.linregX || [];
+                                    const newCols = e.target.checked
+                                      ? [...current, c]
+                                      : current.filter(col => col !== c);
+                                    setAnalysisDraft(prev => ({ ...prev, linregX: newCols }));
+                                  }}
+                                  className="mr-2"
+                                />
+                                <span className="text-xs">{c}</span>
+                              </label>
+                            ))}
+                          </div>
                         </div>
                       </div>
                       <button onClick={() => { if (!analysisDraft.linregY || !analysisDraft.linregX.length) return alert('请选择 y 与 X'); runAnalysis(activeSession.id, 'linear_regression', { y: analysisDraft.linregY, x: analysisDraft.linregX }, `【分析】线性回归：${analysisDraft.linregY} ~ ${analysisDraft.linregX.join('+')}`); }} className="w-full px-3 py-2 rounded bg-indigo-600 text-white text-xs hover:bg-indigo-700">运行线性回归</button>
@@ -3122,9 +3009,25 @@ export default function RadarmApp() {
                         </div>
                         <div className="col-span-2">
                           <div className="text-[11px] font-bold text-slate-600 mb-1">Logistic X（可多选）</div>
-                          <select multiple value={analysisDraft.logitX} onChange={(e) => setAnalysisDraft(prev => ({ ...prev, logitX: Array.from(e.target.selectedOptions).map(o => o.value) }))} className="w-full border rounded px-2 py-1 text-xs h-20">
-                            {getColumnsList(activeSession).map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                            {getColumnsList(activeSession).map(c => (
+                              <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={(analysisDraft.logitX || []).includes(c)}
+                                  onChange={(e) => {
+                                    const current = analysisDraft.logitX || [];
+                                    const newCols = e.target.checked
+                                      ? [...current, c]
+                                      : current.filter(col => col !== c);
+                                    setAnalysisDraft(prev => ({ ...prev, logitX: newCols }));
+                                  }}
+                                  className="mr-2"
+                                />
+                                <span className="text-xs">{c}</span>
+                              </label>
+                            ))}
+                          </div>
                         </div>
                       </div>
                       <button onClick={() => { if (!analysisDraft.logitY || !analysisDraft.logitX.length) return alert('请选择 y 与 X'); runAnalysis(activeSession.id, 'logistic_regression', { y: analysisDraft.logitY, x: analysisDraft.logitX }, `【分析】Logistic回归：${analysisDraft.logitY}`); }} className="w-full px-3 py-2 rounded bg-indigo-600 text-white text-xs hover:bg-indigo-700">运行Logistic回归</button>
@@ -3136,9 +3039,25 @@ export default function RadarmApp() {
                         </div>
                         <div className="col-span-2">
                           <div className="text-[11px] font-bold text-slate-600 mb-1">PCA 列（可多选）</div>
-                          <select multiple value={analysisDraft.pcaCols} onChange={(e) => setAnalysisDraft(prev => ({ ...prev, pcaCols: Array.from(e.target.selectedOptions).map(o => o.value) }))} className="w-full border rounded px-2 py-1 text-xs h-20">
-                            {getColumnsList(activeSession).map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                            {getColumnsList(activeSession).map(c => (
+                              <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={(analysisDraft.pcaCols || []).includes(c)}
+                                  onChange={(e) => {
+                                    const current = analysisDraft.pcaCols || [];
+                                    const newCols = e.target.checked
+                                      ? [...current, c]
+                                      : current.filter(col => col !== c);
+                                    setAnalysisDraft(prev => ({ ...prev, pcaCols: newCols }));
+                                  }}
+                                  className="mr-2"
+                                />
+                                <span className="text-xs">{c}</span>
+                              </label>
+                            ))}
+                          </div>
                         </div>
                       </div>
                       <button onClick={() => { if (!analysisDraft.pcaCols.length) return alert('请选择列'); runAnalysis(activeSession.id, 'pca', { columns: analysisDraft.pcaCols, n_components: Number(analysisDraft.pcaN || 2) }, `【分析】PCA：${analysisDraft.pcaCols.join(', ')}`); }} className="w-full px-3 py-2 rounded bg-indigo-600 text-white text-xs hover:bg-indigo-700">运行PCA</button>
@@ -3150,9 +3069,25 @@ export default function RadarmApp() {
                         </div>
                         <div className="col-span-2">
                           <div className="text-[11px] font-bold text-slate-600 mb-1">KMeans 列（可多选）</div>
-                          <select multiple value={analysisDraft.kmeansCols} onChange={(e) => setAnalysisDraft(prev => ({ ...prev, kmeansCols: Array.from(e.target.selectedOptions).map(o => o.value) }))} className="w-full border rounded px-2 py-1 text-xs h-20">
-                            {getColumnsList(activeSession).map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
+                          <div className="w-full border rounded px-2 py-2 text-xs max-h-32 overflow-y-auto bg-white">
+                            {getColumnsList(activeSession).map(c => (
+                              <label key={c} className="flex items-center py-0.5 hover:bg-slate-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={(analysisDraft.kmeansCols || []).includes(c)}
+                                  onChange={(e) => {
+                                    const current = analysisDraft.kmeansCols || [];
+                                    const newCols = e.target.checked
+                                      ? [...current, c]
+                                      : current.filter(col => col !== c);
+                                    setAnalysisDraft(prev => ({ ...prev, kmeansCols: newCols }));
+                                  }}
+                                  className="mr-2"
+                                />
+                                <span className="text-xs">{c}</span>
+                              </label>
+                            ))}
+                          </div>
                         </div>
                       </div>
                       <button onClick={() => { if (!analysisDraft.kmeansCols.length) return alert('请选择列'); runAnalysis(activeSession.id, 'kmeans', { columns: analysisDraft.kmeansCols, k: Number(analysisDraft.kmeansK || 3) }, `【分析】KMeans(k=${analysisDraft.kmeansK})`); }} className="w-full px-3 py-2 rounded bg-indigo-600 text-white text-xs hover:bg-indigo-700">运行KMeans</button>
@@ -3385,7 +3320,7 @@ export default function RadarmApp() {
                     </div>
                   );
                 })() : (
-                  <div className="space-y-3">
+              <div className="space-y-3">
                     {['planner','executor','verifier'].map(role => {
                       const r = (activeSession.modelPrefs?.agent_multi?.[role]) || { provider: role==='planner'?'deepseekA':role==='executor'?'deepseekB':'deepseekC', model: 'deepseek-reasoner' };
                       const p = r.provider;
@@ -3430,8 +3365,8 @@ export default function RadarmApp() {
                             >
                               {opts.map(mm => <option key={mm} value={mm}>{mm}</option>)}
                             </select>
-                          </div>
-                        </div>
+                 </div>
+              </div>
                       );
                     })}
                   </div>
@@ -3466,7 +3401,7 @@ export default function RadarmApp() {
                 确定
               </button>
             </div>
-          </div>
+           </div>
         </div>
       )}
     </div>
