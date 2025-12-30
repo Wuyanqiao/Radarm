@@ -1,4 +1,4 @@
-# 必须在导入 NumPy/SciPy 之前设置，禁用 Fortran 运行时的 CTRL+C 处理
+﻿# 必须在导入 NumPy/SciPy 之前设置，禁用 Fortran 运行时的 CTRL+C 处理
 # 这可以避免按 CTRL+C 退出时出现 "forrtl: error (200)" 错误
 import os
 os.environ.setdefault('FOR_DISABLE_CONSOLE_CTRL_HANDLER', '1')
@@ -38,6 +38,11 @@ from engine_clean_actions import suggest_clean_actions
 from session_store import ensure_storage_ready, load_session_from_disk, save_session_to_disk
 from analysis_engine import run_analysis
 from engine_report_v2 import run_report_engine_v2
+from tasks import celery_app
+try:
+    from backend.app.services.sandbox_service import SandboxService
+except Exception:
+    SandboxService = None
 
 # 引入基础工具和三个工作流
 import ml_engine as ml
@@ -68,6 +73,8 @@ app.add_middleware(
 sessions = {}
 # 跟踪正在生成的报告：{session_id: {report_id: True/False}}
 report_generation_tracking: Dict[str, Dict[str, bool]] = {}
+# 沙箱实例
+sandbox_service = SandboxService() if SandboxService else None
 
 ensure_storage_ready()
 
@@ -361,6 +368,7 @@ class ReportRequest(BaseModel):
     # 多份报告：saveAsNew=true 默认生成新 report_id；否则可覆盖 reportId
     reportId: Optional[str] = None
     saveAsNew: bool = True
+    runAsync: bool = False
 
 class DBConnectRequest(BaseModel):
     session_id: str
@@ -383,6 +391,28 @@ class ReportDownloadRequest(BaseModel):
     content: str
     filename: str
 
+
+@app.get("/tasks/{task_id}")
+async def task_status(task_id: str):
+    """
+    查询 Celery 任务状态/结果。
+    """
+    res = celery_app.AsyncResult(task_id)
+    result = None
+    if res.successful():
+        try:
+            result = res.get()
+        except Exception:
+            result = str(res.result)
+    elif res.failed():
+        result = str(res.result)
+    return {
+        "id": task_id,
+        "state": res.state,
+        "ready": res.ready(),
+        "successful": res.successful(),
+        "result": result,
+    }
 
 class ApplyActionsRequest(BaseModel):
     session_id: str
@@ -419,6 +449,7 @@ class AnalysisRequest(BaseModel):
     model: Optional[str] = None
     primaryModel: Optional[str] = None
     explain: bool = True
+    runAsync: bool = False
 
 
 class OnboardSuggestRequest(BaseModel):
@@ -1119,9 +1150,99 @@ def sanitize_df_for_json(df_slice):
     d = d.fillna("")
     return d.to_dict(orient='records')
 
+def _run_code_in_sandbox(code_str: str, df: pd.DataFrame, session_id: str) -> Optional[tuple]:
+    """
+    优先在 Docker 沙箱中执行代码。
+    返回 (output_text, img_path, new_df) 或 None 表示失败。
+    """
+    if not sandbox_service or not getattr(sandbox_service, "available", False):
+        return None
+
+    try:
+        safe_sid = _safe_id(session_id)
+        work_host = Path("radarm_data") / "workspaces" / safe_sid
+        work_host.mkdir(parents=True, exist_ok=True)
+        input_pkl = work_host / "input.pkl"
+        output_pkl = work_host / "output.pkl"
+        output_json = work_host / "output.json"
+        runner_py = work_host / "run.py"
+
+        df.copy().to_pickle(input_pkl)
+
+        runner_code = f"""
+import json, pickle, time, os, sys
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set_style("whitegrid")
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False
+
+with open("input.pkl", "rb") as f:
+    df = pickle.load(f)
+
+local_vars = {{
+    "df": df.copy(),
+    "pd": pd,
+    "np": np,
+    "json": json,
+    "plt": plt,
+    "sns": sns,
+}}
+code_str = {json.dumps(code_str)}
+exec(code_str, {{}}, local_vars)
+
+text_res = str(local_vars.get("result", "执行成功"))
+print_out = ""
+
+# 保存图像（如果有）
+img_path = None
+if plt.get_fignums():
+    ts = int(time.time() * 1000)
+    fname = f"chart_{{ts}}.png"
+    plt.savefig(fname, format="png", bbox_inches="tight", dpi=300)
+    img_path = fname
+
+with open("output.pkl", "wb") as f:
+    pickle.dump(local_vars.get("df", df), f)
+
+with open("output.json", "w", encoding="utf-8") as f:
+    f.write(json.dumps({{"output": text_res, "img": img_path}}, ensure_ascii=False))
+"""
+        runner_py.write_text(runner_code, encoding="utf-8")
+
+        res = sandbox_service.exec(session_id, ["python", "run.py"], workdir="/workspace")
+        if res.get("exit_code", -1) != 0:
+            return None
+
+        if not output_json.exists() or not output_pkl.exists():
+            return None
+        meta = json.loads(output_json.read_text(encoding="utf-8"))
+        new_df = pd.read_pickle(output_pkl)
+
+        img_rel = meta.get("img")
+        img_path = None
+        if img_rel:
+            # 将沙箱内生成的图表移到 out/{session_id}/
+            src = work_host / img_rel
+            if src.exists():
+                out_dir = Path("out") / safe_sid
+                out_dir.mkdir(parents=True, exist_ok=True)
+                ts = int(time.time() * 1000)
+                dst = out_dir / f"chart_{ts}.png"
+                src.replace(dst)
+                img_path = f"{safe_sid}/{dst.name}"
+        return meta.get("output", ""), img_path, new_df
+    except Exception:
+        return None
+
+
 def execute_code(code_str: str, df: pd.DataFrame, session_id: str = "default"):
     """
-    代码执行沙盒
+    代码执行沙盒：优先 Docker 沙箱，失败回退本地执行。
     """
     # --- 安全与稳定性：禁止文件/网络/系统操作（避免读取 data.csv 等外部文件） ---
     forbidden_patterns = [
@@ -1148,6 +1269,11 @@ def execute_code(code_str: str, df: pd.DataFrame, session_id: str = "default"):
     for pat in forbidden_patterns:
         if re.search(pat, code_str, re.IGNORECASE):
             return "禁止文件/网络/系统操作：请直接使用已提供的 df 进行分析（不要读取 data.csv 等外部文件）。", None, df
+
+    # --- 优先尝试 Docker 沙箱 ---
+    sbx_res = _run_code_in_sandbox(code_str, df, session_id)
+    if sbx_res is not None:
+        return sbx_res
     
     # 预置常用依赖，减少 LLM 生成代码因 NameError 失败
     local_vars = {
@@ -1937,6 +2063,24 @@ async def generate_report(req: ReportRequest):
     _ensure_reports(session)
     df = session["df"]
 
+    # 预生成 report_id，便于异步返回
+    report_id = None
+    if (not req.saveAsNew) and req.reportId:
+        report_id = _safe_id(req.reportId)
+    else:
+        report_id = _safe_id(uuid.uuid4().hex)
+
+    if getattr(req, "runAsync", False):
+        task = celery_app.send_task(
+            "radarm.report",
+            kwargs={
+                "session_id": req.session_id,
+                "req_obj": req.dict(),
+                "report_id": report_id,
+            },
+        )
+        return {"task_id": task.id, "report_id": report_id, "state": "queued", "message": "报告生成已提交"}
+
     # 选取部分数据：列选择 + @ 引用列
     selected_cols: List[str] = []
     try:
@@ -2015,12 +2159,7 @@ async def generate_report(req: ReportRequest):
         f"样例行(前5行): {sample_rows_preview}"
     )
 
-    # 报告 ID（多份报告）
-    report_id = None
-    if (not req.saveAsNew) and req.reportId:
-        report_id = _safe_id(req.reportId)
-    else:
-        report_id = _safe_id(uuid.uuid4().hex)
+    # 报告 ID（多份报告）已在前面生成
 
     # 设置生成跟踪标志
     if req.session_id not in report_generation_tracking:
@@ -2750,6 +2889,21 @@ async def analysis_run_endpoint(req: AnalysisRequest):
     """
     工具面板的“统计/建模”统一入口：确定性计算（表格+图）+ DeepSeek 解释。
     """
+    if getattr(req, "runAsync", False):
+        task = celery_app.send_task(
+            "radarm.analysis",
+            kwargs={
+                "session_id": req.session_id,
+                "analysis": req.analysis,
+                "params": req.params or {},
+                "explain": bool(req.explain),
+                "api_keys": req.apiKeys or {},
+                "provider": req.provider or "deepseekA",
+                "model": req.model,
+            },
+        )
+        return {"task_id": task.id, "state": "queued", "message": f"分析任务已提交: {req.analysis}"}
+
     session = get_session_data(req.session_id)
     df = session["df"]
 

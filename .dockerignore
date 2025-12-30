@@ -16,13 +16,10 @@ DEPLOYMENT.md
 radarm_data/
 out/
 
-# 前端开发文件
+# 前端开发文件（为了镜像内构建，需要包含这些文件）
+# 如需加速构建，可改为在 CI 中预构建前端并复制 build 目录，此时可重新忽略
+# node_modules/ 保持忽略，防止体积过大
 node_modules/
-src/
-public/
-package*.json
-tailwind.config.js
-postcss.config.js
 
 # Python 相关
 __pycache__/

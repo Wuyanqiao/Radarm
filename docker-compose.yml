@@ -12,15 +12,23 @@ services:
       # 持久化数据目录
       - ./radarm_data:/app/radarm_data
       - ./out:/app/out
+      # 允许容器内管理沙箱容器（若无需沙箱，可移除）
+      - /var/run/docker.sock:/var/run/docker.sock
       # 如果需要挂载环境变量文件
       - ./.env:/app/.env:ro
     environment:
+      - BROKER_URL=redis://redis:6379/0
+      - RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg2://radarm:radarm123@postgres:5432/radarm
       # 如果使用环境变量而不是文件，可以在这里配置
       # - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL}
       # - ZHIPU_BASE_URL=${ZHIPU_BASE_URL}
       # - QWEN_BASE_URL=${QWEN_BASE_URL}
       - PYTHONUNBUFFERED=1
       - FOR_DISABLE_CONSOLE_CTRL_HANDLER=1
+    depends_on:
+      - redis
+      - postgres
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
@@ -29,33 +37,79 @@ services:
       retries: 3
       start_period: 40s
 
-  # 可选：如果需要数据库支持，可以添加数据库服务
-  # mysql:
-  #   image: mysql:8.0
-  #   container_name: radarm-mysql
-  #   environment:
-  #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-radarm123}
-  #     MYSQL_DATABASE: ${MYSQL_DATABASE:-radarm}
-  #   ports:
-  #     - "3306:3306"
-  #   volumes:
-  #     - mysql_data:/var/lib/mysql
-  #   restart: unless-stopped
+  redis:
+    image: redis:7
+    container_name: radarm-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # postgres:
-  #   image: postgres:15
-  #   container_name: radarm-postgres
-  #   environment:
-  #     POSTGRES_USER: ${POSTGRES_USER:-radarm}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-radarm123}
-  #     POSTGRES_DB: ${POSTGRES_DB:-radarm}
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
-  #   restart: unless-stopped
+  postgres:
+    image: postgres:15
+    container_name: radarm-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-radarm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-radarm123}
+      POSTGRES_DB: ${POSTGRES_DB:-radarm}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-radarm} -d ${POSTGRES_DB:-radarm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-# volumes:
-#   mysql_data:
-#   postgres_data:
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: radarm-celery-worker
+    command: ["celery", "-A", "tasks", "worker", "-l", "info", "--concurrency=2"]
+    environment:
+      - BROKER_URL=redis://redis:6379/0
+      - RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg2://radarm:radarm123@postgres:5432/radarm
+      - PYTHONUNBUFFERED=1
+      - FOR_DISABLE_CONSOLE_CTRL_HANDLER=1
+    volumes:
+      - ./radarm_data:/app/radarm_data
+      - ./out:/app/out
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.env:/app/.env:ro
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  dask-scheduler:
+    image: daskdev/dask:2024.5.0
+    container_name: radarm-dask-scheduler
+    command: ["dask-scheduler", "--host", "0.0.0.0"]
+    ports:
+      - "8786:8786"
+      - "8787:8787"  # dashboard
+    restart: unless-stopped
+
+  dask-worker:
+    image: daskdev/dask:2024.5.0
+    container_name: radarm-dask-worker
+    command: ["dask-worker", "tcp://dask-scheduler:8786", "--nthreads", "2", "--memory-limit", "4GB"]
+    depends_on:
+      - dask-scheduler
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:
 
